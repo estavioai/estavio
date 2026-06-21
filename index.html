@@ -297,6 +297,7 @@
   .note-box{background:rgba(255,178,62,.08);border:1px solid rgba(255,178,62,.3);border-radius:11px;padding:14px 16px;font-size:13px;color:#D8C9A8;margin-bottom:20px;display:flex;gap:10px}
   .note-box b{color:var(--amber)}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
@@ -586,8 +587,11 @@
     <div class="auth-card">
       <div class="form-row"><label>Email</label><input id="si_email" type="email" placeholder="you@agency.com"></div>
       <div class="form-row"><label>Password</label><input id="si_pass" type="password" placeholder="Your password"></div>
-      <div style="display:flex;justify-content:flex-end;margin-bottom:20px"><a href="#" style="color:var(--muted);font-size:13px">Forgot password?</a></div>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:20px"><a href="#" style="color:var(--muted);font-size:13px" onclick="forgotPassword();return false">Forgot password?</a></div>
       <button class="btn btn-primary btn-block" onclick="doSignin()">Sign in →</button>
+      <div style="display:flex;align-items:center;gap:12px;margin:18px 0;color:var(--muted);font-size:13px"><span style="flex:1;height:1px;background:var(--line)"></span>or<span style="flex:1;height:1px;background:var(--line)"></span></div>
+      <button class="btn btn-ghost btn-block" onclick="sendMagicLink()">✉️ Email me a login link</button>
+      <p style="text-align:center;color:var(--muted);font-size:12px;margin-top:12px">No password needed — we'll email you a secure one-click link.</p>
     </div>
     <p style="text-align:center;color:var(--muted);font-size:13px;margin-top:18px">New here? <a href="#" style="color:var(--amber)" onclick="go('signup');return false">Sign up</a></p>
   </div>
@@ -609,7 +613,7 @@
         <li>⚙️ Settings</li>
       </ul>
       <div style="margin-top:24px;padding-top:18px;border-top:1px solid var(--line)">
-        <li class="dnav" style="list-style:none" onclick="go('home')">↩ Sign out</li>
+        <li class="dnav" style="list-style:none" onclick="logout()">↩ Sign out</li>
       </div>
     </aside>
     <main class="dash-main">
@@ -677,7 +681,60 @@ let signupData = {};
 let chosenPlan = "Grow";
 let userAccount = null; // in-memory account from this session's signup
 
-/* ============ ROUTING ============ */
+/* ============ SUPABASE AUTH SETUP ============ */
+const SUPABASE_URL = "https://cgtziikizkzwgrbofepv.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNndHppaWtpemt6d2dyYm9mZXB2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwODk4NzgsImV4cCI6MjA5NjY2NTg3OH0.Q6B2eW70F2ZZgVU86SOVn5GXWbUdyfj2ee6L0pNveHI";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+/* Check if an email exists in clients table with an active plan.
+   Returns the client row if found & active, else null. */
+async function getActiveClient(email){
+  try{
+    const { data, error } = await sb
+      .from('clients')
+      .select('email,name,agency_name,plan,plan_status')
+      .eq('email', (email||'').toLowerCase())
+      .maybeSingle();
+    if(error){ console.error('client lookup error', error); return null; }
+    return data || null;
+  }catch(e){ console.error(e); return null; }
+}
+
+/* Map a clients row into the shape applyDashboard expects */
+function clientToAccount(c){
+  // translate permalink → readable plan name
+  const planMap = { pflujg:'Essential', xjupcp:'Grow', cwfzlb:'Pro' };
+  return {
+    email: c.email,
+    agency: c.agency_name || 'Your Agency',
+    name: c.name || '',
+    plan: planMap[c.plan] || c.plan || 'Grow'
+  };
+}
+
+/* On any page load, check if user arrived via magic link or has a live session */
+async function checkAuthOnLoad(){
+  try{
+    const { data:{ session } } = await sb.auth.getSession();
+    if(session && session.user){
+      const email = session.user.email;
+      const client = await getActiveClient(email);
+      if(client){
+        applyDashboard(clientToAccount(client));
+        go('dashboard');
+      } else {
+        // logged in but no active plan → sign them out, send to signup
+        await sb.auth.signOut();
+        if(location.hash.includes('access_token')){
+          toast('No active subscription found for this email. Please sign up.');
+          go('signup');
+        }
+      }
+    }
+  }catch(e){ console.error('auth check', e); }
+}
+
+
 function go(p){
   document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
   document.getElementById('page-'+p).classList.add('active');
@@ -828,21 +885,37 @@ function goPay(){
 }
 
 /* ============ ACCOUNT ============ */
-function createAccount(){
+async function createAccount(){
   const p=document.getElementById('acc_pass').value, p2=document.getElementById('acc_pass2').value;
   if(p.length<8){toast('Password must be at least 8 characters');return;}
   if(p!==p2){toast('Passwords do not match');return;}
-  // remember this session's account so they can sign in again
-  userAccount={
-    email:(signupData.email||'').toLowerCase(),
-    password:p,
-    agency:signupData.agency||"Your Agency",
-    name:signupData.name||"",
-    plan:chosenPlan
-  };
-  applyDashboard(userAccount);
-  toast('Account created — welcome to Estavio! 🎉');
-  setTimeout(()=>go('dashboard'),700);
+  const email=(signupData.email||'').toLowerCase();
+  if(!email){toast('Something went wrong — please restart signup');return;}
+
+  toast('Creating your account…');
+  try{
+    const { data, error } = await sb.auth.signUp({
+      email: email,
+      password: p,
+      options: { emailRedirectTo: 'https://estavioai.github.io/estavio/' }
+    });
+    if(error){
+      if(/already/i.test(error.message)){
+        toast('This email already has an account. Try signing in.');
+        setTimeout(()=>go('signin'),1200);
+      } else {
+        toast('Error: '+error.message);
+      }
+      return;
+    }
+    // account created in Supabase Auth. Now show their dashboard using signup details.
+    userAccount={ email, agency:signupData.agency||"Your Agency", name:signupData.name||"", plan:chosenPlan };
+    applyDashboard(userAccount);
+    toast('Account created — welcome to Estavio! 🎉');
+    setTimeout(()=>go('dashboard'),900);
+  }catch(e){
+    console.error(e); toast('Could not create account. Please try again.');
+  }
 }
 
 /* fill dashboard with a user's details */
@@ -856,20 +929,70 @@ function applyDashboard(acc){
 }
 
 /* ============ SIGN IN ============ */
-function doSignin(){
+async function doSignin(){
   const email=(document.getElementById('si_email').value||'').trim().toLowerCase();
   const pass=document.getElementById('si_pass').value;
   if(!email||!pass){toast('Enter your email and password');return;}
-  // only let in an account created in this session (real cross-device login = Supabase Auth, coming soon)
-  if(userAccount && email===userAccount.email){
-    if(pass!==userAccount.password){toast('Incorrect password');return;}
-    applyDashboard(userAccount);
+
+  toast('Signing you in…');
+  try{
+    const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+    if(error){
+      if(/Invalid login/i.test(error.message)) toast('Incorrect email or password.');
+      else if(/confirm/i.test(error.message)) toast('Please confirm your email first — check your inbox.');
+      else toast('Error: '+error.message);
+      return;
+    }
+    // logged in — now gate: must exist in clients with active plan
+    const client = await getActiveClient(email);
+    if(!client){
+      await sb.auth.signOut();
+      toast('No active subscription found for this email.');
+      return;
+    }
+    applyDashboard(clientToAccount(client));
     toast('Welcome back! 👋');
-    setTimeout(()=>go('dashboard'),500);
-    return;
+    setTimeout(()=>go('dashboard'),600);
+  }catch(e){
+    console.error(e); toast('Could not sign in. Please try again.');
   }
-  // unknown credentials — do NOT grant access
-  toast('No account found with those details. Please sign up first.');
+}
+
+/* ============ MAGIC LINK ============ */
+async function sendMagicLink(){
+  const email=(document.getElementById('si_email').value||'').trim().toLowerCase();
+  if(!email){toast('Enter your email first');return;}
+  toast('Sending your login link…');
+  try{
+    const { error } = await sb.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: 'https://estavioai.github.io/estavio/' }
+    });
+    if(error){ toast('Error: '+error.message); return; }
+    toast('✓ Login link sent! Check your email inbox.');
+  }catch(e){ console.error(e); toast('Could not send link. Try again.'); }
+}
+
+/* ============ FORGOT PASSWORD ============ */
+async function forgotPassword(){
+  const email=(document.getElementById('si_email').value||'').trim().toLowerCase();
+  if(!email){toast('Enter your email first, then click forgot password');return;}
+  toast('Sending reset link…');
+  try{
+    const { error } = await sb.auth.resetPasswordForEmail(email, {
+      redirectTo: 'https://estavioai.github.io/estavio/'
+    });
+    if(error){ toast('Error: '+error.message); return; }
+    toast('✓ Password reset link sent! Check your email.');
+  }catch(e){ console.error(e); toast('Could not send reset. Try again.'); }
+}
+
+/* ============ LOGOUT ============ */
+async function logout(){
+  try{ await sb.auth.signOut(); }catch(e){}
+  userAccount=null;
+  toast('Signed out');
+  setTimeout(()=>go('home'),400);
 }
 
 /* ============ SUPPORT BOT (self-contained, works anywhere) ============ */
@@ -972,6 +1095,9 @@ function toast(msg){
   const t=document.getElementById('toast');t.innerHTML='<span>✦</span>'+msg;t.classList.add('show');
   clearTimeout(tT);tT=setTimeout(()=>t.classList.remove('show'),3000);
 }
+
+/* ============ ON PAGE LOAD — check for magic link / existing session ============ */
+window.addEventListener('load', ()=>{ checkAuthOnLoad(); });
 </script>
 </body>
 </html>
