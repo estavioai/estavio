@@ -979,30 +979,41 @@ async function checkPaymentReturn(){
   const params = new URLSearchParams(location.search);
   if(!params.has('paid')) return false;   // not a payment return
 
-  // restore the signup details we saved before checkout
-  let pending={};
-  try{ pending = JSON.parse(sessionStorage.getItem('estavio_pending')||'{}'); }catch(e){}
-  const email = (pending.email||'').toLowerCase();
-
-  if(!email){
-    // no saved details — send them to sign in (their account may already be set via webhook)
-    toast('Payment received! Please sign in or use "Email me a login link".');
-    go('signin');
-    return true;
-  }
-
-  // put them on the signup page, account-creation step, and verify payment landed
-  signupData = pending;
-  chosenPlan = pending.plan || 'Grow';
-  go('signup');
-  showStep(4);
-  document.getElementById('acc_email').value = email;
-
-  // clean the ?paid marker from the URL
+  const planMarker = params.get('paid') || '';
+  // clean the ?paid marker from the URL right away
   history.replaceState(null,'',location.pathname);
 
-  // verify their payment reached our database (Gumroad webhook → clients table)
-  verifyPaymentLanded(email, 0);
+  // restore the signup details we saved before checkout (may be empty on a fresh return)
+  let pending={};
+  try{ pending = JSON.parse(sessionStorage.getItem('estavio_pending')||'{}'); }catch(e){}
+  let email = (pending.email||'').toLowerCase();
+
+  // show the signup page WITHOUT triggering go()'s step-1 reset:
+  document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
+  document.getElementById('page-signup').classList.add('active');
+  window.scrollTo(0,0);
+  showStep(4);   // jump straight to the create-login step
+
+  const emailField = document.getElementById('acc_email');
+
+  if(email){
+    // we have their details from the session
+    signupData = pending;
+    chosenPlan = pending.plan || planMarker || 'Grow';
+    emailField.value = email;
+    emailField.setAttribute('readonly','');
+    emailField.style.opacity = '.7';
+    verifyPaymentLanded(email, 0);
+  } else {
+    // fresh return (new tab/device): let them type the email they paid with
+    signupData = { plan: planMarker };
+    chosenPlan = planMarker || 'Grow';
+    emailField.removeAttribute('readonly');
+    emailField.style.opacity = '1';
+    emailField.placeholder = 'Enter the email you paid with';
+    emailField.value = '';
+    toast('Payment received! Enter your email and create a password to finish.');
+  }
   return true;
 }
 
@@ -1028,8 +1039,17 @@ async function createAccount(){
   const p=document.getElementById('acc_pass').value, p2=document.getElementById('acc_pass2').value;
   if(p.length<8){toast('Password must be at least 8 characters');return;}
   if(p!==p2){toast('Passwords do not match');return;}
-  const email=(signupData.email||'').toLowerCase();
-  if(!email){toast('Something went wrong — please restart signup');return;}
+  // email: prefer the field (covers the case where they typed it after a lost session)
+  const email=((document.getElementById('acc_email').value||signupData.email||'').trim()).toLowerCase();
+  if(!email){toast('Please enter your email');return;}
+
+  // professionalism gate: confirm this email actually has a paid subscription before creating login
+  toast('Verifying your subscription…');
+  const paidClient = await getActiveClient(email);
+  if(!paidClient){
+    toast('We couldn\'t find a paid subscription for this email. If you just paid, wait a moment and retry, or email estavioai@gmail.com.');
+    return;
+  }
 
   toast('Creating your account…');
   try{
@@ -1323,8 +1343,12 @@ function toast(msg){
 
 /* ============ ON PAGE LOAD — check for magic link / existing session ============ */
 window.addEventListener('load', async ()=>{
-  const wasPaymentReturn = await checkPaymentReturn();
-  if(!wasPaymentReturn){ checkAuthOnLoad(); }
+  // payment return takes absolute priority
+  if(new URLSearchParams(location.search).has('paid')){
+    try{ await checkPaymentReturn(); }catch(e){ console.error('payment return error', e); }
+    return;   // never run the auth/session check on a payment return
+  }
+  try{ await checkAuthOnLoad(); }catch(e){ console.error(e); }
 });
 </script>
 </body>
