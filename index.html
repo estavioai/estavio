@@ -963,12 +963,64 @@ function escapeHtml(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&l
 
 /* ============ PAYMENT ============ */
 function goPay(){
-  // open real Gumroad checkout
+  // save signup details so they survive the redirect back from Gumroad
+  try{
+    sessionStorage.setItem('estavio_pending', JSON.stringify({
+      ...signupData, plan: chosenPlan
+    }));
+  }catch(e){}
+  // send them to Gumroad checkout (Gumroad is configured to redirect back after payment)
   const url=GUMROAD[chosenPlan]||GUMROAD.Grow;
-  window.open(url,'_blank');
-  // advance to account creation (in production: triggered by Gumroad webhook/return)
-  document.getElementById('acc_email').value=signupData.email||"";
-  setTimeout(()=>showStep(4),600);
+  window.location.href = url;   // same-tab so the post-payment redirect lands back here
+}
+
+/* ============ POST-PAYMENT RETURN — called on page load ============ */
+async function checkPaymentReturn(){
+  const params = new URLSearchParams(location.search);
+  if(!params.has('paid')) return false;   // not a payment return
+
+  // restore the signup details we saved before checkout
+  let pending={};
+  try{ pending = JSON.parse(sessionStorage.getItem('estavio_pending')||'{}'); }catch(e){}
+  const email = (pending.email||'').toLowerCase();
+
+  if(!email){
+    // no saved details — send them to sign in (their account may already be set via webhook)
+    toast('Payment received! Please sign in or use "Email me a login link".');
+    go('signin');
+    return true;
+  }
+
+  // put them on the signup page, account-creation step, and verify payment landed
+  signupData = pending;
+  chosenPlan = pending.plan || 'Grow';
+  go('signup');
+  showStep(4);
+  document.getElementById('acc_email').value = email;
+
+  // clean the ?paid marker from the URL
+  history.replaceState(null,'',location.pathname);
+
+  // verify their payment reached our database (Gumroad webhook → clients table)
+  verifyPaymentLanded(email, 0);
+  return true;
+}
+
+/* poll the clients table a few times to confirm the webhook recorded the payment */
+async function verifyPaymentLanded(email, attempt){
+  const client = await getActiveClient(email);
+  if(client){
+    toast('✓ Payment confirmed — create your login below');
+    return;
+  }
+  if(attempt < 5){
+    // webhook may take a few seconds; retry
+    if(attempt===0) toast('Confirming your payment…');
+    setTimeout(()=>verifyPaymentLanded(email, attempt+1), 2500);
+  } else {
+    // took too long — let them proceed anyway (webhook likely just slow); account still gated at login
+    toast('Almost there — you can create your login now.');
+  }
 }
 
 /* ============ ACCOUNT ============ */
@@ -996,6 +1048,7 @@ async function createAccount(){
       return;
     }
     // account created in Supabase Auth. Now show their dashboard using signup details.
+    try{ sessionStorage.removeItem('estavio_pending'); }catch(e){}
     userAccount={ email, agency:signupData.agency||"Your Agency", name:signupData.name||"", plan:chosenPlan };
     applyDashboard(userAccount);
     toast('Account created — welcome to Estavio! 🎉');
@@ -1269,7 +1322,10 @@ function toast(msg){
 }
 
 /* ============ ON PAGE LOAD — check for magic link / existing session ============ */
-window.addEventListener('load', ()=>{ checkAuthOnLoad(); });
+window.addEventListener('load', async ()=>{
+  const wasPaymentReturn = await checkPaymentReturn();
+  if(!wasPaymentReturn){ checkAuthOnLoad(); }
+});
 </script>
 </body>
 </html>
