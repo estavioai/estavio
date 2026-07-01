@@ -332,7 +332,7 @@
       <a href="#" onclick="go('home');scrollTo(0,0);return false">Home</a>
       <a href="#pricing" onclick="go('home');return false">Pricing</a>
       <a href="#how" onclick="go('home');return false">How it works</a>
-      <a href="#" onclick="go('signin');return false">Sign in</a>
+      <a href="#" id="navSignin" onclick="go('signin');return false">Sign in</a>
       <a href="#" class="btn btn-primary" style="padding:10px 18px" onclick="go('signup');return false">Sign up →</a>
     </div>
   </div>
@@ -763,23 +763,42 @@ function clientToAccount(c){
 /* On any page load, check if user arrived via magic link or has a live session */
 async function checkAuthOnLoad(){
   try{
+    // did the user just arrive by clicking a magic link / confirmation link?
+    const cameFromEmailLink = location.hash.includes('access_token') || location.hash.includes('type=magiclink') || location.hash.includes('type=recovery') || location.hash.includes('type=signup');
+
     const { data:{ session } } = await sb.auth.getSession();
     if(session && session.user){
       const email = session.user.email;
       const client = await getActiveClient(email);
       if(client){
+        // prepare their dashboard, but ONLY jump to it if they arrived via an email link.
         applyDashboard(clientToAccount(client));
-        go('dashboard');
+        if(cameFromEmailLink){
+          history.replaceState(null,'',location.pathname); // clean the token out of the URL
+          go('dashboard');
+        } else {
+          // normal visit with an existing session: stay on homepage, offer a shortcut
+          showDashboardShortcut();
+        }
       } else {
-        // logged in but no active plan → sign them out, send to signup
+        // logged in but no active plan
         await sb.auth.signOut();
-        if(location.hash.includes('access_token')){
+        if(cameFromEmailLink){
           toast('No active subscription found for this email. Please sign up.');
           go('signup');
         }
       }
     }
   }catch(e){ console.error('auth check', e); }
+}
+
+/* If a returning user has a live session, swap the nav "Sign in" for a dashboard link */
+function showDashboardShortcut(){
+  const navSignin = document.getElementById('navSignin');
+  if(navSignin){
+    navSignin.textContent = 'My Dashboard →';
+    navSignin.setAttribute('onclick', "go('dashboard');return false");
+  }
 }
 
 
